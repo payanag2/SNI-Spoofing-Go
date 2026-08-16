@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"sni-spoofing-go/config"
 	"sni-spoofing-go/guiapi"
 	"sni-spoofing-go/helper"
 	"sni-spoofing-go/helper/spawn"
@@ -22,8 +26,6 @@ type TestResult = guiapi.TestResult
 type TestSummary = guiapi.TestSummary
 type TestPreflight = guiapi.TestPreflight
 
-// App is the Wails-bound application object. Privileged work runs in a separate
-// elevated helper process; this struct is the unprivileged GUI front-end.
 type App struct {
 	ctx context.Context
 
@@ -32,9 +34,7 @@ type App struct {
 	status  ProxyStatus
 }
 
-func NewApp() *App {
-	return &App{}
-}
+func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -57,9 +57,7 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 }
 
-func (a *App) onHelperLog(ev LogEvent) {
-	a.emitLog(ev.Level, ev.Message)
-}
+func (a *App) onHelperLog(ev LogEvent) { a.emitLog(ev.Level, ev.Message) }
 
 func (a *App) onHelperStatus(st ProxyStatus) {
 	a.mu.Lock()
@@ -68,9 +66,7 @@ func (a *App) onHelperStatus(st ProxyStatus) {
 	a.emitStatus(st)
 }
 
-func (a *App) onHelperTestResult(row TestResult) {
-	a.emitTestResult(row)
-}
+func (a *App) onHelperTestResult(row TestResult) { a.emitTestResult(row) }
 
 func (a *App) onHelperDisconnect(err error) {
 	a.mu.Lock()
@@ -79,9 +75,7 @@ func (a *App) onHelperDisconnect(err error) {
 	if active && err != nil && !errors.Is(err, io.EOF) {
 		a.emitLog("warn", fmt.Sprintf("helper disconnected: %v", err))
 	}
-	if active {
-		a.clearStatus()
-	}
+	if active { a.clearStatus() }
 }
 
 func (a *App) clearStatus() {
@@ -91,19 +85,58 @@ func (a *App) clearStatus() {
 	a.emitStatus(a.status)
 }
 
+func (a *App) configPath() (string, error) {
+	exe, err := spawn.SelfExe()
+	if err != nil { return "", err }
+	return filepath.Join(filepath.Dir(exe), "config.ini"), nil
+}
+
+func applySavedOption(dst *ProxyConfig, opts config.FileOptions) {
+	if opts.Has("listen") { dst.Listen = opts.Listen }
+	if opts.Has("connect") { dst.Connect = opts.Connect }
+	if opts.Has("fake-sni") { dst.FakeSNI = opts.FakeSNI }
+	if opts.Has("utls") { dst.UTLS = opts.UTLS }
+	if opts.Has("injector") { dst.Injector = opts.Injector }
+	if opts.Has("fake-repeat") { dst.FakeRepeat = opts.FakeRepeat }
+	if opts.Has("fake-delay") { dst.FakeDelayMs = int(opts.FakeDelay / time.Millisecond) }
+	if opts.Has("ack-timeout") { dst.AckTimeoutMs = int(opts.AckTimeout / time.Millisecond) }
+	if opts.Has("enable-fragment") { dst.EnableFragment = opts.EnableFragment }
+	if opts.Has("fragment-delay") { dst.FragmentDelayMs = int(opts.FragmentDelay / time.Millisecond) }
+	if opts.Has("sni-chunk") { dst.SNIChunk = opts.SNIChunk }
+}
+
 func (a *App) GetDefaultConfig() ProxyConfig {
-	return guiapi.DefaultConfig(string(proxy.DefaultInjectorMode()))
+	cfg := guiapi.DefaultConfig(string(proxy.DefaultInjectorMode()))
+	path, err := a.configPath()
+	if err != nil { return cfg }
+	opts, err := config.LoadFileOptions(path)
+	if err != nil { return cfg }
+	applySavedOption(&cfg, opts)
+	return cfg
+}
+
+func (a *App) SaveConfig(cfg ProxyConfig) error {
+	if err := guiapi.ValidateConfig(cfg); err != nil { return err }
+	path, err := a.configPath()
+	if err != nil { return err }
+
+	content := fmt.Sprintf("# SNI Spoofing GUI configuration\nlisten=%s\nconnect=%s\nfake-sni=%s\nutls=%s\ninjector=%s\nfake-repeat=%d\nfake-delay=%dms\nack-timeout=%dms\nenable-fragment=%t\nfragment-delay=%dms\nsni-chunk=%d\n", cfg.Listen, cfg.Connect, cfg.FakeSNI, cfg.UTLS, cfg.Injector, cfg.FakeRepeat, cfg.FakeDelayMs, cfg.AckTimeoutMs, cfg.EnableFragment, cfg.FragmentDelayMs, cfg.SNIChunk)
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil { return err }
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	a.emitLog("info", fmt.Sprintf("Configuration saved to %s", path))
+	return nil
 }
 
 func (a *App) UTLSPresets() []string {
-	return []string{
-		"none", "firefox", "chrome", "edge", "safari", "ios", "qq", "360browser",
-	}
+	return []string{"none", "firefox", "chrome", "edge", "safari", "ios", "qq", "360browser"}
 }
 
-func (a *App) InjectorModes() []string {
-	return []string{"active", "passive"}
-}
+func (a *App) InjectorModes() []string { return []string{"active", "passive"} }
 
 func (a *App) Status() ProxyStatus {
 	a.mu.Lock()
@@ -112,27 +145,19 @@ func (a *App) Status() ProxyStatus {
 }
 
 func (a *App) helperProgress() helper.ProgressFunc {
-	return func(message string) {
-		a.emitLog("info", message)
-	}
+	return func(message string) { a.emitLog("info", message) }
 }
 
 func (a *App) helperClient(ctx context.Context) (*helper.Client, error) {
-	if a.manager == nil {
-		return nil, errors.New("helper manager not initialized")
-	}
+	if a.manager == nil { return nil, errors.New("helper manager not initialized") }
 	return a.manager.Ensure(ctx, a.helperProgress())
 }
 
 func (a *App) Start(cfg ProxyConfig) error {
-	if err := guiapi.ValidateConfig(cfg); err != nil {
-		return err
-	}
+	if err := guiapi.ValidateConfig(cfg); err != nil { return err }
 	a.emitLog("info", "Starting proxy…")
 	client, err := a.helperClient(a.ctx)
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	return client.Start(a.ctx, cfg)
 }
 
@@ -141,52 +166,34 @@ func (a *App) Stop() error {
 	active := a.status.Running || a.status.Testing
 	mgr := a.manager
 	a.mu.Unlock()
-	if !active {
-		return nil
-	}
-	if mgr == nil {
-		a.clearStatus()
-		return nil
-	}
+	if !active { return nil }
+	if mgr == nil { a.clearStatus(); return nil }
 	if err := mgr.Stop(a.ctx); err != nil {
-		if errors.Is(err, helper.ErrNotConnected) {
-			a.clearStatus()
-			return nil
-		}
+		if errors.Is(err, helper.ErrNotConnected) { a.clearStatus(); return nil }
 		a.emitLog("warn", fmt.Sprintf("stop: %v", err))
 	}
 	return nil
 }
 
 func (a *App) RunTest(cfg ProxyConfig) (TestSummary, error) {
-	if err := guiapi.ValidateConfig(cfg); err != nil {
-		return TestSummary{}, err
-	}
+	if err := guiapi.ValidateConfig(cfg); err != nil { return TestSummary{}, err }
 	a.emitLog("info", "Running test matrix…")
 	client, err := a.helperClient(a.ctx)
-	if err != nil {
-		return TestSummary{}, err
-	}
+	if err != nil { return TestSummary{}, err }
 	return client.RunTest(a.ctx, cfg)
 }
 
 func (a *App) emitLog(level, message string) {
-	if a.ctx == nil {
-		return
-	}
+	if a.ctx == nil { return }
 	runtime.EventsEmit(a.ctx, "log", LogEvent{Level: level, Message: message})
 }
 
 func (a *App) emitStatus(s ProxyStatus) {
-	if a.ctx == nil {
-		return
-	}
+	if a.ctx == nil { return }
 	runtime.EventsEmit(a.ctx, "status", s)
 }
 
 func (a *App) emitTestResult(r TestResult) {
-	if a.ctx == nil {
-		return
-	}
+	if a.ctx == nil { return }
 	runtime.EventsEmit(a.ctx, "test_result", r)
 }
