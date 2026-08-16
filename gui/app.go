@@ -52,9 +52,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	if a.manager != nil {
-		_ = a.manager.Close()
-	}
+	if a.manager != nil { _ = a.manager.Close() }
 }
 
 func (a *App) onHelperLog(ev LogEvent) { a.emitLog(ev.Level, ev.Message) }
@@ -125,8 +123,15 @@ func (a *App) SaveConfig(cfg ProxyConfig) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil { return err }
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
+		// Windows does not replace an existing destination with Rename.
+		if removeErr := os.Remove(path); removeErr != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if retryErr := os.Rename(tmp, path); retryErr != nil {
+			_ = os.Remove(tmp)
+			return retryErr
+		}
 	}
 	a.emitLog("info", fmt.Sprintf("Configuration saved to %s", path))
 	return nil
