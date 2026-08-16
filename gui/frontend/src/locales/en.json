@@ -32,7 +32,8 @@
     "stop": "Stop",
     "test": "Run test matrix",
     "cancel_test": "Cancel test",
-    "clear_logs": "Clear logs"
+    "clear_logs": "Clear logs",
+    "save": "Save"
   },
   "logs": {
     "title": "Logs",
