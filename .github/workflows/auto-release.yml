@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: Build Windows GUI
+  build-release:
+    name: Build all release binaries
     runs-on: ubuntu-latest
 
     steps:
@@ -29,20 +29,24 @@ jobs:
           cache: "npm"
           cache-dependency-path: gui/frontend/package-lock.json
 
+      - name: Build all CLI binaries
+        run: make dist
+
       - name: Install Linux GUI build dependencies
         run: make deps-linux
 
-      - name: Build Windows GUI
+      - name: Build Windows GUI AMD64
         run: make gui-windows-amd64
 
-      - name: Locate Windows executable/package
-        id: asset
-        shell: bash
+      - name: Build Windows GUI ARM64
+        run: make gui-windows-arm64
+
+      - name: Create checksums
         run: |
           set -euo pipefail
-          asset="$(make -s gui-asset-windows-amd64)"
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
-          sha256sum "$asset" | tee "${asset}.sha256"
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create automatic release
         env:
@@ -52,7 +56,6 @@ jobs:
           tag="build-${{ github.run_number }}"
           title="Automatic Build #${{ github.run_number }}"
           gh release create "$tag" \
-            "${{ steps.asset.outputs.asset }}" \
-            "${{ steps.asset.outputs.asset }}.sha256" \
+            dist/* \
             --title "$title" \
             --generate-notes
